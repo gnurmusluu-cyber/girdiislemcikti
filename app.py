@@ -214,6 +214,7 @@ class GameHub:
             "botSimulatedDelayMs": None,
             "botSimulatedChoice": None,
             "badges": [],
+            "lastSeen": time.time(),
         }
 
     def join_player(self, pin, player_id, nickname, avatar="🕵️"):
@@ -225,10 +226,12 @@ class GameHub:
             if len(clean_name) < 2:
                 return None, "Lütfen en az 2 karakterli bir takma ad girin."
 
+            now = time.time()
             for pid, existing in list(room["players"].items()):
                 if pid == player_id or (not existing["isBot"] and existing["nickname"].lower() == clean_name.lower()):
                     existing["nickname"] = clean_name
                     existing["avatar"] = avatar or existing["avatar"]
+                    existing["lastSeen"] = now
                     room["players"][player_id] = existing
                     if pid != player_id:
                         del room["players"][pid]
@@ -237,6 +240,42 @@ class GameHub:
             new_p = self.create_player(player_id, clean_name, avatar, is_bot=False)
             room["players"][player_id] = new_p
             return new_p, None
+
+    def heartbeat_player(self, pin, player_id):
+        with self.lock:
+            room = self.rooms.get(str(pin).strip())
+            if not room:
+                return
+            player = room["players"].get(player_id)
+            if player:
+                player["lastSeen"] = time.time()
+
+    def leave_player(self, pin, player_id):
+        with self.lock:
+            room = self.rooms.get(str(pin).strip())
+            if not room:
+                return
+            room["players"].pop(player_id, None)
+
+    def prune_inactive_players(self, pin, timeout_sec=6.0):
+        with self.lock:
+            room = self.rooms.get(str(pin).strip())
+            if not room:
+                return
+            now = time.time()
+            stale_ids = [
+                pid
+                for pid, p in room["players"].items()
+                if not p.get("isBot", False) and (now - p.get("lastSeen", now)) > timeout_sec
+            ]
+            for pid in stale_ids:
+                del room["players"][pid]
+
+            if stale_ids and room["state"] == "QUESTION":
+                total_players = len(room["players"])
+                answered_count = sum(1 for p in room["players"].values() if p["currentAnswer"] is not None)
+                if total_players > 0 and answered_count >= total_players:
+                    self._transition_to_reveal_locked(room)
 
     def add_bot(self, pin):
         with self.lock:
@@ -722,6 +761,8 @@ def render_host_screen():
         st.session_state.host_pin = room["pin"]
         pin = room["pin"]
 
+    hub.prune_inactive_players(pin, timeout_sec=6.0)
+
     if room["state"] == "QUESTION":
         hub.tick_room(pin)
 
@@ -729,7 +770,7 @@ def render_host_screen():
     total_players = len(room["players"])
     answered_count = sum(1 for p in room["players"].values() if p["currentAnswer"] is not None)
 
-    ctrl1, ctrl2, ctrl3, ctrl4 = st.columns([2.2, 2.2, 2, 2])
+    ctrl1, ctrl2, ctrl3, ctrl4, ctrl5 = st.columns([2.0, 1.8, 2.0, 1.6, 1.8])
     with ctrl1:
         render_html(
             f"""
@@ -745,17 +786,21 @@ def render_host_screen():
             <div style="background:#0f172a;border:1px solid #334155;border-radius:16px;padding:8px 16px;text-align:center;">
                 <span style="font-size:18px;">🎓</span>
                 <span style="font-size:20px;font-weight:800;color:#34d399;margin:0 6px;">{total_players}</span>
-                <span style="font-size:12px;color:#cbd5e1;font-weight:600;">Öğrenci</span>
+                <span style="font-size:12px;color:#cbd5e1;font-weight:600;">Aktif</span>
             </div>
             """
         )
     with ctrl3:
-        if st.button("🤖 + Örnek Öğrenci Ekle", use_container_width=True, disabled=(room["state"] != "LOBBY")):
+        if st.button("🤖 + Örnek Öğrenci", use_container_width=True, disabled=(room["state"] != "LOBBY")):
             hub.add_bot(pin)
             st.rerun()
     with ctrl4:
         if st.button("↺ Lobiye Dön", use_container_width=True):
             hub.reset_room(pin, keep_players=True)
+            st.rerun()
+    with ctrl5:
+        if st.button("🗑️ Odayı Temizle", use_container_width=True):
+            hub.reset_room(pin, keep_players=False)
             st.rerun()
 
     st.write("")
@@ -1085,6 +1130,9 @@ def render_player_screen():
         st.rerun()
         return
 
+    hub.heartbeat_player(pin, st.session_state.client_id)
+    hub.prune_inactive_players(pin, timeout_sec=6.0)
+
     if room["state"] == "QUESTION":
         hub.tick_room(pin)
 
@@ -1098,18 +1146,25 @@ def render_player_screen():
         if player["fireMode"]
         else ""
     )
-    render_html(
-        f"""
-        <div style="background:#0f172a;border:1px solid #334155;border-radius:16px;padding:10px 16px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;">
-            <div style="font-weight:800;font-size:15px;color:white;">🕵️ {player['nickname']} <span style="font-size:11px;color:#94a3b8;margin-left:6px;">(PIN: {pin})</span></div>
-            <div style="display:flex;gap:10px;align-items:center;">
-                {streak_badge_html}
-                <span style="background:#020617;border:1px solid #334155;color:#38bdf8;padding:3px 10px;border-radius:10px;font-family:monospace;font-weight:800;">#{my_rank}</span>
-                <span style="background:rgba(245,158,11,0.2);border:1px solid rgba(245,158,11,0.4);color:#fbbf24;padding:3px 12px;border-radius:10px;font-family:monospace;font-weight:800;">{player['score']} P</span>
+    st_bar_col1, st_bar_col2 = st.columns([5.2, 1.3])
+    with st_bar_col1:
+        render_html(
+            f"""
+            <div style="background:#0f172a;border:1px solid #334155;border-radius:16px;padding:10px 16px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;">
+                <div style="font-weight:800;font-size:15px;color:white;">🕵️ {player['nickname']} <span style="font-size:11px;color:#94a3b8;margin-left:6px;">(PIN: {pin})</span></div>
+                <div style="display:flex;gap:10px;align-items:center;">
+                    {streak_badge_html}
+                    <span style="background:#020617;border:1px solid #334155;color:#38bdf8;padding:3px 10px;border-radius:10px;font-family:monospace;font-weight:800;">#{my_rank}</span>
+                    <span style="background:rgba(245,158,11,0.2);border:1px solid rgba(245,158,11,0.4);color:#fbbf24;padding:3px 12px;border-radius:10px;font-family:monospace;font-weight:800;">{player['score']} P</span>
+                </div>
             </div>
-        </div>
-        """
-    )
+            """
+        )
+    with st_bar_col2:
+        if st.button("🚪 Çıkış", use_container_width=True):
+            hub.leave_player(pin, st.session_state.client_id)
+            st.session_state.player_joined = False
+            st.rerun()
 
     if room["state"] == "LOBBY":
         render_html(
