@@ -1,0 +1,2 @@
+streamlit>=1.38.0
+tornado>=6.4

@@ -1,0 +1,27 @@
+{
+  "name": "gic-fabrikasi-quiz",
+  "version": "1.0.0",
+  "description": "GİÇ Fabrikası (Input-Process-Output Detective) - Real-time Multiplayer Educational Quiz Game for High School Students",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js || python3 server.py",
+    "node": "node server.js",
+    "python": "python3 server.py",
+    "dev": "node server.js || python3 server.py"
+  },
+  "keywords": [
+    "education",
+    "input-process-output",
+    "girdi-islem-cikti",
+    "quiz",
+    "multiplayer",
+    "socket.io",
+    "websocket"
+  ],
+  "author": "GİÇ Fabrikası",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.19.2",
+    "socket.io": "^4.7.5"
+  }
+}
