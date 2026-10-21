@@ -590,6 +590,12 @@ st.markdown(
 )
 
 
+def render_html(raw_html: str):
+    """Renders HTML cleanly in Streamlit by stripping line indentation so Markdown never treats it as a code block."""
+    clean = "\n".join(line.strip() for line in raw_html.splitlines() if line.strip())
+    st.markdown(clean, unsafe_allow_html=True)
+
+
 def play_web_audio(effect_name: str, unique_key: str):
     js_code = f"""
     <script>
@@ -680,7 +686,7 @@ is_locked_student_link = (query_mode == "play") or st.session_state.player_joine
 if not is_locked_student_link:
     top_col1, top_col2, top_col3 = st.columns([3, 2, 2])
     with top_col1:
-        st.markdown(
+        render_html(
             """
             <div style="display:flex;align-items:center;gap:12px;">
                 <div style="width:46px;height:46px;border-radius:14px;background:linear-gradient(135deg,#f59e0b,#e11d48);display:flex;align-items:center;justify-content:center;font-size:24px;">🕵️</div>
@@ -691,8 +697,7 @@ if not is_locked_student_link:
                     <div style="font-size:12px;color:#94a3b8;">[ GİRDİ (Input) ] ➔ [ İŞLEM (Process) ] ➔ [ ÇIKTI (Output) ]</div>
                 </div>
             </div>
-            """,
-            unsafe_allow_html=True,
+            """
         )
     with top_col2:
         if st.button("📱 Öğrenci Ekranı", use_container_width=True, type="primary" if st.session_state.role == "player" else "secondary"):
@@ -702,7 +707,7 @@ if not is_locked_student_link:
         if st.button("🖥️ Akıllı Tahta (Öğretmen) Ekranı", use_container_width=True, type="primary" if st.session_state.role == "host" else "secondary"):
             st.session_state.role = "host"
             st.rerun()
-    st.markdown("<hr style='border-color:#1e293b;margin:0.6rem 0 1.2rem 0;'>", unsafe_allow_html=True)
+    render_html("<hr style='border-color:#1e293b;margin:0.6rem 0 1.2rem 0;'>")
 
 
 # ============================================================================
@@ -726,25 +731,23 @@ def render_host_screen():
 
     ctrl1, ctrl2, ctrl3, ctrl4 = st.columns([2.2, 2.2, 2, 2])
     with ctrl1:
-        st.markdown(
+        render_html(
             f"""
             <div style="background:#0f172a;border:2px solid #f59e0b;border-radius:16px;padding:8px 16px;text-align:center;">
                 <span style="font-size:11px;color:#94a3b8;font-weight:700;">4 HANELİ PIN:</span>
                 <span style="font-family:'JetBrains Mono',monospace;font-size:22px;font-weight:800;color:#fbbf24;margin-left:8px;letter-spacing:4px;">{pin}</span>
             </div>
-            """,
-            unsafe_allow_html=True,
+            """
         )
     with ctrl2:
-        st.markdown(
+        render_html(
             f"""
             <div style="background:#0f172a;border:1px solid #334155;border-radius:16px;padding:8px 16px;text-align:center;">
                 <span style="font-size:18px;">🎓</span>
                 <span style="font-size:20px;font-weight:800;color:#34d399;margin:0 6px;">{total_players}</span>
                 <span style="font-size:12px;color:#cbd5e1;font-weight:600;">Öğrenci</span>
             </div>
-            """,
-            unsafe_allow_html=True,
+            """
         )
     with ctrl3:
         if st.button("🤖 + Örnek Öğrenci Ekle", use_container_width=True, disabled=(room["state"] != "LOBBY")):
@@ -760,14 +763,13 @@ def render_host_screen():
     if room["state"] == "LOBBY":
         left_col, right_col = st.columns([5, 7])
         with left_col:
-            st.markdown(
+            render_html(
                 f"""
                 <div style="background:#0f172a;border:2px solid rgba(251,191,36,0.5);border-radius:24px;padding:24px;text-align:center;">
                     <div style="font-size:12px;font-weight:800;color:#fbbf24;letter-spacing:2px;text-transform:uppercase;">4 HANELİ OYUN PIN KODU</div>
                     <div style="font-family:'JetBrains Mono',monospace;font-size:64px;font-weight:800;color:#fbbf24;letter-spacing:8px;margin:4px 0;">{pin}</div>
                 </div>
-                """,
-                unsafe_allow_html=True,
+                """
             )
             components.html(
                 f"""
@@ -817,14 +819,13 @@ def render_host_screen():
                 cols = st.columns(3)
                 for idx, p in enumerate(leaderboard):
                     with cols[idx % 3]:
-                        st.markdown(
+                        render_html(
                             f"""
                             <div style="background:#020617;border:1px solid #334155;border-radius:14px;padding:10px 12px;margin-bottom:8px;display:flex;align-items:center;gap:10px;">
                                 <span style="font-size:22px;">{p['avatar']}</span>
                                 <div style="font-weight:700;font-size:14px;color:white;">{p['nickname']}</div>
                             </div>
-                            """,
-                            unsafe_allow_html=True,
+                            """
                         )
             st.write("")
             if st.button("🚀 Oyunu Başlat", type="primary", use_container_width=True):
@@ -848,7 +849,7 @@ def render_host_screen():
         h_col1, h_col2 = st.columns([4.2, 1.3])
         with h_col1:
             stroke_col = "#f43f5e" if (rem_sec <= 5 and not is_reveal) else "#10b981"
-            st.markdown(
+            render_html(
                 f"""
                 <div style="background:#0f172a;border:1px solid #1e293b;border-radius:20px;padding:14px 20px;display:flex;justify-content:space-between;align-items:center;">
                     <div>
@@ -869,8 +870,7 @@ def render_host_screen():
                         </div>
                     </div>
                 </div>
-                """,
-                unsafe_allow_html=True,
+                """
             )
 
         with h_col2:
@@ -909,7 +909,7 @@ def render_host_screen():
             </div>
             """
 
-        st.markdown(
+        render_html(
             f"""
             <div style="background:#0f172a;border:1px solid #1e293b;border-radius:24px;padding:20px;margin-top:12px;">
                 <div style="display:grid;grid-template-columns:1fr auto 1fr auto 1fr;gap:12px;align-items:center;">
@@ -924,8 +924,7 @@ def render_host_screen():
                     {q['question']}
                 </div>
             </div>
-            """,
-            unsafe_allow_html=True,
+            """
         )
 
         opt_counts = [0, 0, 0, 0]
@@ -944,14 +943,13 @@ def render_host_screen():
             vote_badge = f"<span style='background:#020617;padding:4px 10px;border-radius:10px;font-family:monospace;font-size:13px;'>{opt_counts[idx]} kişi {'✓' if is_correct_opt else ''}</span>" if is_reveal else ""
 
             with target_col:
-                st.markdown(
+                render_html(
                     f"""
                     <div style="background:{bg_col};border:{ring};opacity:{opacity};border-radius:18px;padding:16px 18px;margin-top:10px;display:flex;align-items:center;justify-content:space-between;gap:14px;color:white;font-weight:700;font-size:16px;">
                         <span>{meta['label']} — {opt_text}</span>
                         {vote_badge}
                     </div>
-                    """,
-                    unsafe_allow_html=True,
+                    """
                 )
 
         # Reveal Mode Answer Distribution Bar Chart
@@ -969,7 +967,7 @@ def render_host_screen():
                     <div style="font-size:12px;font-weight:700;color:#cbd5e1;margin-top:6px;">{meta['label']}</div>
                 </div>
                 """
-            st.markdown(
+            render_html(
                 f"""
                 <div style="background:#0f172a;border:1px solid #1e293b;border-radius:20px;padding:16px 20px;margin-top:14px;">
                     <div style="font-weight:800;font-size:15px;color:white;margin-bottom:10px;">📊 Sınıf Cevap Dağılım Grafiği</div>
@@ -977,8 +975,7 @@ def render_host_screen():
                         {bars_html}
                     </div>
                 </div>
-                """,
-                unsafe_allow_html=True,
+                """
             )
 
     elif room["state"] == "LEADERBOARD":
@@ -997,7 +994,7 @@ def render_host_screen():
                 if p["fireMode"]
                 else ""
             )
-            st.markdown(
+            render_html(
                 f"""
                 <div style="background:#0f172a;border:2px solid {'#f97316' if p['fireMode'] else '#334155'};border-radius:18px;padding:14px 20px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;">
                     <div style="display:flex;align-items:center;gap:14px;">
@@ -1012,8 +1009,7 @@ def render_host_screen():
                         {p['score']} PUAN
                     </div>
                 </div>
-                """,
-                unsafe_allow_html=True,
+                """
             )
 
     elif room["state"] == "FINAL_PODIUM":
@@ -1029,7 +1025,7 @@ def render_host_screen():
             with p_cols[col_idx]:
                 if rank_idx < len(leaderboard):
                     pl = leaderboard[rank_idx]
-                    st.markdown(
+                    render_html(
                         f"""
                         <div style="background:#0f172a;border:3px solid {border_col};border-radius:24px;padding:22px;text-align:center;">
                             <div style="font-size:14px;font-weight:800;color:{border_col};">{label}</div>
@@ -1037,8 +1033,7 @@ def render_host_screen():
                             <div style="font-size:22px;font-weight:800;color:white;">{pl['nickname']}</div>
                             <div style="font-family:'JetBrains Mono',monospace;font-size:28px;font-weight:800;color:#fbbf24;margin-top:8px;">{pl['score']} P</div>
                         </div>
-                        """,
-                        unsafe_allow_html=True,
+                        """
                     )
 
         st.write("")
@@ -1046,7 +1041,7 @@ def render_host_screen():
         b_cols = st.columns(3)
         for idx, aw in enumerate(room.get("specialAwards", [])):
             with b_cols[idx % 3]:
-                st.markdown(
+                render_html(
                     f"""
                     <div style="background:#020617;border:1px solid rgba(251,191,36,0.4);border-radius:18px;padding:16px;display:flex;align-items:center;gap:14px;">
                         <div style="font-size:34px;">{aw['icon']}</div>
@@ -1056,8 +1051,7 @@ def render_host_screen():
                             <div style="font-size:14px;font-weight:700;color:#38bdf8;margin-top:2px;">{aw['winner']}</div>
                         </div>
                     </div>
-                    """,
-                    unsafe_allow_html=True,
+                    """
                 )
 
 
@@ -1099,30 +1093,33 @@ def render_player_screen():
     my_rank = next((item["rank"] for item in leaderboard if item["id"] == player["id"]), 1)
 
     # Top Student Status Bar
-    st.markdown(
+    streak_badge_html = (
+        f"<span style='background:#ea580c;color:white;padding:3px 10px;border-radius:99px;font-size:12px;font-weight:800;'>🔥 {player['streak']}x Seri</span>"
+        if player["fireMode"]
+        else ""
+    )
+    render_html(
         f"""
         <div style="background:#0f172a;border:1px solid #334155;border-radius:16px;padding:10px 16px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;">
             <div style="font-weight:800;font-size:15px;color:white;">🕵️ {player['nickname']} <span style="font-size:11px;color:#94a3b8;margin-left:6px;">(PIN: {pin})</span></div>
             <div style="display:flex;gap:10px;align-items:center;">
-                {f"<span style='background:#ea580c;color:white;padding:3px 10px;border-radius:99px;font-size:12px;font-weight:800;'>🔥 {player['streak']}x Seri</span>" if player['fireMode'] else ""}
+                {streak_badge_html}
                 <span style="background:#020617;border:1px solid #334155;color:#38bdf8;padding:3px 10px;border-radius:10px;font-family:monospace;font-weight:800;">#{my_rank}</span>
                 <span style="background:rgba(245,158,11,0.2);border:1px solid rgba(245,158,11,0.4);color:#fbbf24;padding:3px 12px;border-radius:10px;font-family:monospace;font-weight:800;">{player['score']} P</span>
             </div>
         </div>
-        """,
-        unsafe_allow_html=True,
+        """
     )
 
     if room["state"] == "LOBBY":
-        st.markdown(
+        render_html(
             f"""
             <div style="background:#0f172a;border:2px solid #10b981;border-radius:24px;padding:28px;text-align:center;">
                 <div style="font-size:48px;margin-bottom:8px;">🕵️</div>
                 <div style="font-family:'Fredoka',sans-serif;font-size:24px;font-weight:700;color:white;">Hoş Geldin, {player['nickname']}!</div>
                 <div style="font-size:16px;color:#fbbf24;font-weight:700;margin-top:8px;">Öğretmenin oyunu başlatması bekleniyor...</div>
             </div>
-            """,
-            unsafe_allow_html=True,
+            """
         )
 
     elif room["state"] == "QUESTION":
@@ -1132,12 +1129,11 @@ def render_player_screen():
         rem_sec = max(0, int(math.ceil((QUESTION_DURATION_MS - (now_ms - room["questionStartTime"])) / 1000.0)))
 
         if player["fireMode"]:
-            st.markdown(
-                "<div style='background:linear-gradient(90deg,#ea580c,#e11d48);color:white;padding:8px 14px;border-radius:12px;font-weight:800;text-align:center;margin-bottom:10px;'>🔥 Alev Modu Aktif! (Bu soruda +%20 Puan Bonusu!)</div>",
-                unsafe_allow_html=True,
+            render_html(
+                "<div style='background:linear-gradient(90deg,#ea580c,#e11d48);color:white;padding:8px 14px;border-radius:12px;font-weight:800;text-align:center;margin-bottom:10px;'>🔥 Alev Modu Aktif! (Bu soruda +%20 Puan Bonusu!)</div>"
             )
 
-        st.markdown(
+        render_html(
             f"""
             <div style="background:#0f172a;border:1px solid #334155;border-radius:18px;padding:14px 18px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;">
                 <div>
@@ -1147,19 +1143,17 @@ def render_player_screen():
                 </div>
                 <div style="font-family:monospace;font-size:22px;font-weight:800;color:#34d399;">⏱️ {rem_sec}s</div>
             </div>
-            """,
-            unsafe_allow_html=True,
+            """
         )
 
         if player["currentAnswer"] is not None:
-            st.markdown(
+            render_html(
                 """
                 <div style="background:#0f172a;border:2px solid #38bdf8;border-radius:22px;padding:28px;text-align:center;">
                     <div style="font-size:40px;margin-bottom:6px;">⏳</div>
                     <div style="font-family:'Fredoka',sans-serif;font-size:22px;font-weight:700;color:white;">Cevabın Alındı! Bekleniyor...</div>
                 </div>
-                """,
-                unsafe_allow_html=True,
+                """
             )
         else:
             b_col1, b_col2 = st.columns(2)
@@ -1167,9 +1161,8 @@ def render_player_screen():
                 meta = OPTION_META[idx]
                 target = b_col1 if idx % 2 == 0 else b_col2
                 with target:
-                    st.markdown(
-                        f"<div style='background:{meta['hex']};color:white;padding:8px 14px;border-radius:14px 14px 0 0;font-weight:800;font-size:14px;'>{meta['label']}</div>",
-                        unsafe_allow_html=True,
+                    render_html(
+                        f"<div style='background:{meta['hex']};color:white;padding:8px 14px;border-radius:14px 14px 0 0;font-weight:800;font-size:14px;'>{meta['label']}</div>"
                     )
                     if st.button(f"{opt_text}", key=f"ans_{q_idx}_{idx}", use_container_width=True):
                         hub.submit_answer(pin, st.session_state.client_id, idx)
@@ -1180,19 +1173,18 @@ def render_player_screen():
         ans = player["currentAnswer"] or {"isCorrect": False, "pointsEarned": 0}
         if ans["isCorrect"]:
             play_web_audio("correct", f"p_rev_{pin}_{q['id']}")
-            st.markdown(
+            render_html(
                 f"""
                 <div style="background:linear-gradient(180deg,rgba(6,95,70,0.92),#0f172a);border:2px solid #10b981;border-radius:24px;padding:26px;text-align:center;">
                     <div style="font-size:48px;">✅</div>
                     <div style="font-family:'Fredoka',sans-serif;font-size:28px;font-weight:700;color:white;">Tebrikler! +{ans['pointsEarned']} Puan</div>
                     <div style="font-size:14px;color:#d1fae5;margin-top:8px;">Sıralaman: <b>#{my_rank}</b> • Toplam Puanın: <b>{player['score']}</b></div>
                 </div>
-                """,
-                unsafe_allow_html=True,
+                """
             )
         else:
             play_web_audio("wrong", f"p_rev_{pin}_{q['id']}")
-            st.markdown(
+            render_html(
                 f"""
                 <div style="background:linear-gradient(180deg,rgba(136,19,55,0.92),#0f172a);border:2px solid #f43f5e;border-radius:24px;padding:26px;text-align:center;">
                     <div style="font-size:48px;">❌</div>
@@ -1200,21 +1192,19 @@ def render_player_screen():
                     <div style="font-size:13px;color:#fecdd3;margin-top:6px;">Doğru Cevap: <b>{q['options'][q['correctIndex']]}</b></div>
                     <div style="font-size:14px;color:#f8fafc;margin-top:8px;">Sıralaman: <b>#{my_rank}</b> • Toplam Puanın: <b>{player['score']}</b></div>
                 </div>
-                """,
-                unsafe_allow_html=True,
+                """
             )
 
     elif room["state"] == "FINAL_PODIUM":
         trigger_canvas_confetti(f"p_final_{pin}")
-        st.markdown(
+        render_html(
             f"""
             <div style="background:#0f172a;border:2px solid #fbbf24;border-radius:24px;padding:24px;text-align:center;">
                 <div style="font-size:52px;">🏆</div>
                 <div style="font-family:'Fredoka',sans-serif;font-size:28px;font-weight:700;color:white;">Sıralaman: #{my_rank}</div>
                 <div style="font-family:'JetBrains Mono',monospace;font-size:32px;font-weight:800;color:#fbbf24;margin:6px 0;">{player['score']} Puan</div>
             </div>
-            """,
-            unsafe_allow_html=True,
+            """
         )
         st.write("")
         for b in player.get("badges", []):
