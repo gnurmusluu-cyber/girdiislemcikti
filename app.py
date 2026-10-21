@@ -521,11 +521,12 @@ class GameHub:
 
 
 @st.cache_resource
-def get_hub() -> GameHub:
+def get_hub(version: str = "v2_heartbeat") -> GameHub:
     return GameHub()
 
 
-hub = get_hub()
+hub = get_hub("v2_heartbeat")
+hub.__class__ = GameHub
 
 # ============================================================================
 # GLOBAL CSS (INCLUDING THUMB-FRIENDLY COLORED PLAYER BUTTONS)
