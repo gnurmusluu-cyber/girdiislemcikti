@@ -496,10 +496,41 @@ st.markdown(
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Fredoka:wght@500;600;700&family=Inter:wght@400;600;700;800&family=JetBrains+Mono:wght@600;700;800&display=swap');
 
+    /* Force dark theme even if .streamlit/config.toml is not uploaded */
+    .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"] {
+        background-color: #070b19 !important;
+        color: #f8fafc !important;
+    }
+
+    /* Make Streamlit top bar transparent & prevent it from covering top content */
+    header[data-testid="stHeader"] {
+        background: rgba(7, 11, 25, 0.75) !important;
+        backdrop-filter: blur(8px);
+    }
+
     .block-container {
-        padding-top: 1.3rem !important;
-        padding-bottom: 2rem !important;
+        padding-top: 4.2rem !important;
+        padding-bottom: 2.5rem !important;
         max-width: 1220px !important;
+    }
+
+    /* Dark-styled form card & inputs regardless of browser light/dark mode */
+    [data-testid="stForm"] {
+        background-color: #0f172a !important;
+        border: 1px solid #1e293b !important;
+        border-radius: 24px !important;
+        padding: 24px !important;
+    }
+    [data-testid="stForm"] label, [data-testid="stForm"] p, [data-testid="stForm"] h3 {
+        color: #f8fafc !important;
+    }
+    .stTextInput input {
+        background-color: #020617 !important;
+        color: #fbbf24 !important;
+        border: 2px solid #334155 !important;
+        border-radius: 14px !important;
+        font-weight: 700 !important;
+        font-size: 16px !important;
     }
 
     @keyframes conveyorMove {
@@ -543,6 +574,15 @@ st.markdown(
         font-weight: 700 !important;
         padding: 0.75rem 1.1rem !important;
         font-size: 16px !important;
+    }
+    div.stButton > button[kind="secondary"] {
+        background-color: #1e293b !important;
+        color: #f8fafc !important;
+        border: 1px solid #475569 !important;
+    }
+    div.stButton > button[kind="secondary"]:hover {
+        border-color: #fbbf24 !important;
+        color: #fbbf24 !important;
     }
     </style>
     """,
