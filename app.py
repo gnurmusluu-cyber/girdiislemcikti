@@ -1224,7 +1224,7 @@ def render_player_screen():
                         hub.submit_answer(pin, st.session_state.client_id, idx)
                         st.rerun()
 
-    elif room["state"] in ("REVEAL", "LEADERBOARD"):
+    elif room["state"] == "REVEAL":
         q = QUESTIONS[room["currentQuestionIndex"]]
         ans = player["currentAnswer"] or {"isCorrect": False, "pointsEarned": 0}
         if ans["isCorrect"]:
@@ -1247,6 +1247,68 @@ def render_player_screen():
                     <div style="font-family:'Fredoka',sans-serif;font-size:28px;font-weight:700;color:white;">Yanlış Cevap</div>
                     <div style="font-size:13px;color:#fecdd3;margin-top:6px;">Doğru Cevap: <b>{q['options'][q['correctIndex']]}</b></div>
                     <div style="font-size:14px;color:#f8fafc;margin-top:8px;">Sıralaman: <b>#{my_rank}</b> • Toplam Puanın: <b>{player['score']}</b></div>
+                </div>
+                """
+            )
+
+    elif room["state"] == "LEADERBOARD":
+        render_html(
+            f"""
+            <div style="background:#0f172a;border:1px solid #334155;border-radius:18px;padding:14px 18px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;">
+                <div style="font-family:'Fredoka',sans-serif;font-size:20px;font-weight:700;color:#fbbf24;">
+                    🏆 Görev {room['currentQuestionIndex'] + 1} Sonrası Liderlik Tablosu
+                </div>
+                <div style="font-size:13px;color:#38bdf8;font-weight:800;">
+                    Senin Sıran: #{my_rank} ({player['score']} P)
+                </div>
+            </div>
+            """
+        )
+        medals = ["🥇", "🥈", "🥉", "4.", "5."]
+        for idx, p in enumerate(leaderboard[:5]):
+            is_me = (p["id"] == player["id"])
+            fire_html = (
+                f"<span style='background:linear-gradient(90deg,#ea580c,#e11d48);color:white;padding:3px 10px;border-radius:99px;font-size:11px;font-weight:800;margin-left:8px;'>🔥 {p['streak']}x Seri</span>"
+                if p["fireMode"]
+                else ""
+            )
+            me_badge = (
+                "<span style='background:rgba(56,189,248,0.2);color:#38bdf8;border:1px solid rgba(56,189,248,0.4);padding:2px 8px;border-radius:99px;font-size:11px;font-weight:800;margin-left:6px;'>SEN</span>"
+                if is_me
+                else ""
+            )
+            border_color = "#38bdf8" if is_me else ("#f97316" if p["fireMode"] else "#334155")
+            bg_color = "rgba(15, 23, 42, 0.98)" if not is_me else "rgba(8, 47, 73, 0.65)"
+            render_html(
+                f"""
+                <div style="background:{bg_color};border:2px solid {border_color};border-radius:18px;padding:12px 18px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;">
+                    <div style="display:flex;align-items:center;gap:12px;">
+                        <span style="font-size:22px;font-weight:800;">{medals[idx]}</span>
+                        <span style="font-size:24px;">{p['avatar']}</span>
+                        <div>
+                            <span style="font-size:16px;font-weight:800;color:white;">{p['nickname']}</span>
+                            {me_badge}
+                            {fire_html}
+                        </div>
+                    </div>
+                    <div style="font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:800;color:#fbbf24;">
+                        {p['score']} P
+                    </div>
+                </div>
+                """
+            )
+        if my_rank > 5:
+            render_html(
+                f"""
+                <div style="background:rgba(8, 47, 73, 0.65);border:2px solid #38bdf8;border-radius:18px;padding:12px 18px;margin-top:6px;display:flex;justify-content:space-between;align-items:center;">
+                    <div style="display:flex;align-items:center;gap:12px;">
+                        <span style="font-size:18px;font-weight:800;color:#38bdf8;">#{my_rank}</span>
+                        <span style="font-size:24px;">{player['avatar']}</span>
+                        <span style="font-size:16px;font-weight:800;color:white;">{player['nickname']} (Sen)</span>
+                    </div>
+                    <div style="font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:800;color:#fbbf24;">
+                        {player['score']} P
+                    </div>
                 </div>
                 """
             )

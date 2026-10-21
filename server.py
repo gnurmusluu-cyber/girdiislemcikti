@@ -441,7 +441,8 @@ def build_player_state_payload(room, player):
             "correctIndex": q["correctIndex"] if is_reveal_or_later else None,
             "correctOptionText": q["options"][q["correctIndex"]] if is_reveal_or_later else None
         },
-        "top3": leaderboard[:3] if room["state"] == "FINAL_PODIUM" else []
+        "top3": leaderboard[:3] if room["state"] == "FINAL_PODIUM" else [],
+        "top5": leaderboard[:5] if room["state"] in ("LEADERBOARD", "FINAL_PODIUM") else []
     }
 
 

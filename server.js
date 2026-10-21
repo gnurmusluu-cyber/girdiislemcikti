@@ -432,7 +432,8 @@ function buildPlayerStatePayload(room, player) {
       correctIndex: isRevealOrLater ? q.correctIndex : null,
       correctOptionText: isRevealOrLater ? q.options[q.correctIndex] : null
     },
-    top3: room.state === 'FINAL_PODIUM' ? leaderboard.slice(0, 3) : []
+    top3: room.state === 'FINAL_PODIUM' ? leaderboard.slice(0, 3) : [],
+    top5: (room.state === 'LEADERBOARD' || room.state === 'FINAL_PODIUM') ? leaderboard.slice(0, 5) : []
   };
 }
 
