@@ -6,6 +6,13 @@ import uuid
 import streamlit as st
 import streamlit.components.v1 as components
 
+# Disable per-rerun full Gen-2 garbage collection so 17-35+ concurrent students never stall the GIL
+try:
+    from streamlit import config as _st_config
+    _st_config.set_option("runner.postScriptGC", False)
+except Exception:
+    pass
+
 # ============================================================================
 # PAGE CONFIGURATION
 # ============================================================================
@@ -257,10 +264,13 @@ class GameHub:
                 return
             room["players"].pop(player_id, None)
 
-    def prune_inactive_players(self, pin, timeout_sec=6.0):
+    def prune_inactive_players(self, pin, timeout_sec=15.0):
         with self.lock:
             room = self.rooms.get(str(pin).strip())
             if not room:
+                return
+            # Only remove inactive players while in LOBBY so students never get dropped mid-game!
+            if room["state"] != "LOBBY":
                 return
             now = time.time()
             stale_ids = [
@@ -271,11 +281,23 @@ class GameHub:
             for pid in stale_ids:
                 del room["players"][pid]
 
-            if stale_ids and room["state"] == "QUESTION":
-                total_players = len(room["players"])
-                answered_count = sum(1 for p in room["players"].values() if p["currentAnswer"] is not None)
-                if total_players > 0 and answered_count >= total_players:
-                    self._transition_to_reveal_locked(room)
+    def _check_auto_reveal_locked(self, room):
+        if room["state"] != "QUESTION":
+            return
+        total_players = len(room["players"])
+        if total_players == 0:
+            return
+        now = time.time()
+        # Consider players active if bot, answered, or seen within last 15 seconds
+        active_players = [
+            p
+            for p in room["players"].values()
+            if p.get("isBot", False) or p["currentAnswer"] is not None or (now - p.get("lastSeen", now)) <= 15.0
+        ]
+        target_pool = active_players if active_players else list(room["players"].values())
+        answered_count = sum(1 for p in target_pool if p["currentAnswer"] is not None)
+        if len(target_pool) > 0 and answered_count >= len(target_pool):
+            self._transition_to_reveal_locked(room)
 
     def add_bot(self, pin):
         with self.lock:
@@ -315,20 +337,21 @@ class GameHub:
                         wrong = [i for i in range(4) if i != q["correctIndex"]]
                         p["botSimulatedChoice"] = random.choice(wrong)
 
-    def submit_answer(self, pin, player_id, option_index, custom_elapsed_ms=None):
+    def submit_answer(self, pin, player_id, option_index, custom_elapsed_ms=None, fallback_nickname=None):
         with self.lock:
             room = self.rooms.get(str(pin).strip())
             if not room or room["state"] != "QUESTION":
                 return
             player = room["players"].get(player_id)
+            if not player and fallback_nickname:
+                player = self.create_player(player_id, fallback_nickname, "🕵️", is_bot=False)
+                room["players"][player_id] = player
             if not player or player["currentAnswer"] is not None:
                 return
+            player["lastSeen"] = time.time()
             self._record_answer_locked(room, player, int(option_index), custom_elapsed_ms)
-            # Check if all players have now answered -> auto-reveal!
-            total_players = len(room["players"])
-            answered_count = sum(1 for p in room["players"].values() if p["currentAnswer"] is not None)
-            if total_players > 0 and answered_count >= total_players:
-                self._transition_to_reveal_locked(room)
+            # Check if all active players have now answered -> auto-reveal!
+            self._check_auto_reveal_locked(room)
 
     def _record_answer_locked(self, room, player, idx, custom_elapsed_ms=None):
         q = QUESTIONS[room["currentQuestionIndex"]]
@@ -389,16 +412,15 @@ class GameHub:
             now_ms = time.time() * 1000.0
             elapsed_ms = now_ms - (room["questionStartTime"] or now_ms)
 
-            for p in room["players"].values():
+            for p in list(room["players"].values()):
                 if p["isBot"] and p["currentAnswer"] is None and p["botSimulatedDelayMs"] is not None:
                     if elapsed_ms >= p["botSimulatedDelayMs"]:
                         self._record_answer_locked(room, p, p["botSimulatedChoice"], p["botSimulatedDelayMs"])
 
-            total_players = len(room["players"])
-            answered_count = sum(1 for p in room["players"].values() if p["currentAnswer"] is not None)
-
-            if elapsed_ms >= QUESTION_DURATION_MS or (total_players > 0 and answered_count >= total_players):
+            if elapsed_ms >= QUESTION_DURATION_MS:
                 self._transition_to_reveal_locked(room)
+            else:
+                self._check_auto_reveal_locked(room)
 
     def _transition_to_reveal_locked(self, room):
         if room["state"] == "REVEAL":
@@ -511,7 +533,8 @@ class GameHub:
                 room["players"].clear()
 
     def get_leaderboard(self, room):
-        players = list(room["players"].values())
+        with self.lock:
+            players = [dict(p) for p in room["players"].values()]
         players.sort(key=lambda p: (-p["score"], -p["correctCount"], p["correctResponseTimeMs"]))
         result = []
         for idx, p in enumerate(players):
@@ -521,11 +544,11 @@ class GameHub:
 
 
 @st.cache_resource
-def get_hub(version: str = "v2_heartbeat") -> GameHub:
+def get_hub(version: str = "v3_nonblocking") -> GameHub:
     return GameHub()
 
 
-hub = get_hub("v2_heartbeat")
+hub = get_hub("v3_nonblocking")
 hub.__class__ = GameHub
 
 # ============================================================================
@@ -624,6 +647,12 @@ st.markdown(
         border-color: #fbbf24 !important;
         color: #fbbf24 !important;
     }
+
+    @keyframes gicTimerShrink {
+        from { width: 100%; background-color: #10b981; }
+        70%  { background-color: #f59e0b; }
+        to   { width: 0%; background-color: #f43f5e; }
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -637,41 +666,47 @@ def render_html(raw_html: str):
 
 
 def play_web_audio(effect_name: str, unique_key: str):
+    if "played_fx_keys" not in st.session_state:
+        st.session_state.played_fx_keys = set()
+    if unique_key in st.session_state.played_fx_keys:
+        return
+    st.session_state.played_fx_keys.add(unique_key)
+
     js_code = f"""
     <script>
     (function() {{
-      const key = "gic_snd_{unique_key}";
-      if (window.sessionStorage.getItem(key)) return;
-      window.sessionStorage.setItem(key, "1");
-      const AudioCtx = window.parent.AudioContext || window.parent.webkitAudioContext || window.AudioContext;
-      if (!AudioCtx) return;
-      const ctx = new AudioCtx();
-      function tone(freq, type, dur, delay, gainVal) {{
-        const now = ctx.currentTime + delay;
-        const osc = ctx.createOscillator();
-        const g = ctx.createGain();
-        osc.type = type;
-        osc.frequency.setValueAtTime(freq, now);
-        g.gain.setValueAtTime(gainVal, now);
-        g.gain.exponentialRampToValueAtTime(0.001, now + dur);
-        osc.connect(g);
-        g.connect(ctx.destination);
-        osc.start(now);
-        osc.stop(now + dur);
-      }}
-      const eff = "{effect_name}";
-      if (eff === "question") {{
-        tone(392, "triangle", 0.12, 0, 0.14);
-        tone(523.25, "triangle", 0.18, 0.11, 0.16);
-      }} else if (eff === "correct" || eff === "reveal") {{
-        tone(523.25, "triangle", 0.12, 0, 0.18);
-        tone(659.25, "triangle", 0.12, 0.10, 0.18);
-        tone(783.99, "triangle", 0.15, 0.20, 0.18);
-        tone(1046.5, "triangle", 0.30, 0.30, 0.22);
-      }} else if (eff === "wrong") {{
-        tone(240, "sawtooth", 0.18, 0, 0.15);
-        tone(180, "sawtooth", 0.28, 0.16, 0.18);
-      }}
+      try {{
+        const AudioCtx = window.AudioContext || window.webkitAudioContext || (window.parent && (window.parent.AudioContext || window.parent.webkitAudioContext));
+        if (!AudioCtx) return;
+        const ctx = new AudioCtx();
+        function tone(freq, type, dur, delay, gainVal) {{
+          const now = ctx.currentTime + delay;
+          const osc = ctx.createOscillator();
+          const g = ctx.createGain();
+          osc.type = type;
+          osc.frequency.setValueAtTime(freq, now);
+          g.gain.setValueAtTime(gainVal, now);
+          g.gain.exponentialRampToValueAtTime(0.001, now + dur);
+          osc.connect(g);
+          g.connect(ctx.destination);
+          osc.start(now);
+          osc.stop(now + dur);
+        }}
+        const eff = "{effect_name}";
+        if (eff === "question") {{
+          tone(392, "triangle", 0.12, 0, 0.14);
+          tone(523.25, "triangle", 0.18, 0.11, 0.16);
+        }} else if (eff === "correct" || eff === "reveal") {{
+          tone(523.25, "triangle", 0.12, 0, 0.18);
+          tone(659.25, "triangle", 0.12, 0.10, 0.18);
+          tone(783.99, "triangle", 0.15, 0.20, 0.18);
+          tone(1046.5, "triangle", 0.30, 0.30, 0.22);
+        }} else if (eff === "wrong") {{
+          tone(240, "sawtooth", 0.18, 0, 0.15);
+          tone(180, "sawtooth", 0.28, 0.16, 0.18);
+        }}
+        setTimeout(() => {{ try {{ ctx.close(); }} catch(e) {{}} }}, 900);
+      }} catch (e) {{}}
     }})();
     </script>
     """
@@ -679,24 +714,29 @@ def play_web_audio(effect_name: str, unique_key: str):
 
 
 def trigger_canvas_confetti(unique_key: str):
-    js_code = f"""
+    if "played_fx_keys" not in st.session_state:
+        st.session_state.played_fx_keys = set()
+    if unique_key in st.session_state.played_fx_keys:
+        return
+    st.session_state.played_fx_keys.add(unique_key)
+
+    js_code = """
     <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.9.3/dist/confetti.browser.min.js"></script>
     <script>
-    (function() {{
-      const key = "gic_conf_{unique_key}";
-      if (window.sessionStorage.getItem(key)) return;
-      window.sessionStorage.setItem(key, "1");
-      if (window.confetti) {{
-        window.confetti({{ particleCount: 100, spread: 80, origin: {{ y: 0.6 }} }});
-      }}
-    }})();
+    (function() {
+      try {
+        if (window.confetti) {
+          window.confetti({ particleCount: 100, spread: 80, origin: { y: 0.6 } });
+        }
+      } catch (e) {}
+    })();
     </script>
     """
     components.html(js_code, height=0)
 
 
 # ============================================================================
-# SESSION STATE
+# SESSION STATE & CALLBACKS
 # ============================================================================
 if "client_id" not in st.session_state:
     st.session_state.client_id = f"st_{uuid.uuid4().hex[:10]}"
@@ -714,6 +754,34 @@ if "player_pin" not in st.session_state:
     st.session_state.player_pin = query_pin if query_pin else None
 
 if "player_joined" not in st.session_state:
+    st.session_state.player_joined = False
+
+if "player_nickname" not in st.session_state:
+    st.session_state.player_nickname = ""
+
+
+def _cb_host_add_bot(pin: str):
+    hub.add_bot(pin)
+
+
+def _cb_host_reset(pin: str, keep_players: bool):
+    hub.reset_room(pin, keep_players=keep_players)
+
+
+def _cb_host_start(pin: str):
+    hub.start_question(pin, 0)
+
+
+def _cb_host_next_step(pin: str):
+    hub.next_step(pin)
+
+
+def _cb_player_answer(pin: str, client_id: str, opt_idx: int, nickname: str):
+    hub.submit_answer(pin, client_id, opt_idx, fallback_nickname=nickname)
+
+
+def _cb_player_leave(pin: str, client_id: str):
+    hub.leave_player(pin, client_id)
     st.session_state.player_joined = False
 
 # ============================================================================
@@ -751,9 +819,105 @@ if not is_locked_student_link:
 
 
 # ============================================================================
-# HOST SCREEN (/host)
+# HOST SCREEN (/host) — NON-BLOCKING LIVE FRAGMENTS + STATIC ACTION BUTTONS
 # ============================================================================
 @st.fragment(run_every=1.0)
+def _host_lobby_live_fragment(pin: str):
+    hub.prune_inactive_players(pin, timeout_sec=15.0)
+    room = hub.get_room(pin)
+    if not room:
+        return
+    if (room["state"], room["currentQuestionIndex"]) != st.session_state.get("host_rendered_sig"):
+        st.rerun()
+        return
+
+    leaderboard = hub.get_leaderboard(room)
+    if not leaderboard:
+        render_html(
+            """
+            <div style="background:#0f172a;border:1px solid #1e293b;border-radius:18px;padding:20px;color:#38bdf8;font-weight:600;font-size:15px;">
+                🎓 <b>Katılan Öğrenciler (0 Aktif)</b><br><br>
+                📡 Öğrencilerin katılması bekleniyor... Öğrenciler kendi bilgisayarlarından linke tıklayıp 4 haneli PIN ile katıldığında anında burada görünecek.
+            </div>
+            """
+        )
+    else:
+        cards_html = "".join(
+            f"""
+            <div style="background:#020617;border:1px solid #334155;border-radius:14px;padding:10px 12px;display:flex;align-items:center;gap:10px;">
+                <span style="font-size:22px;">{p['avatar']}</span>
+                <div style="font-weight:700;font-size:14px;color:white;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{p['nickname']}</div>
+            </div>
+            """
+            for p in leaderboard
+        )
+        render_html(
+            f"""
+            <div style="background:#0f172a;border:1px solid #1e293b;border-radius:20px;padding:18px;">
+                <div style="font-family:'Fredoka',sans-serif;font-size:20px;font-weight:700;color:white;margin-bottom:12px;">
+                    🎓 Katılan Öğrenciler <span style="color:#34d399;">({len(leaderboard)} Aktif)</span>
+                </div>
+                <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:10px;">
+                    {cards_html}
+                </div>
+            </div>
+            """
+        )
+
+
+@st.fragment(run_every=1.0)
+def _host_question_live_fragment(pin: str):
+    room = hub.get_room(pin)
+    if not room:
+        return
+    if room["state"] == "QUESTION":
+        hub.tick_room(pin)
+
+    if (room["state"], room["currentQuestionIndex"]) != st.session_state.get("host_rendered_sig"):
+        st.rerun()
+        return
+
+    q_idx = room["currentQuestionIndex"]
+    q = QUESTIONS[q_idx]
+    is_reveal = (room["state"] == "REVEAL")
+
+    with hub.lock:
+        total_players = len(room["players"])
+        answered_count = sum(1 for p in room["players"].values() if p["currentAnswer"] is not None)
+
+    now_ms = time.time() * 1000.0
+    elapsed_ms = (now_ms - room["questionStartTime"]) if room["questionStartTime"] else 0
+    rem_ms = 0 if is_reveal else max(0, int(QUESTION_DURATION_MS - elapsed_ms))
+    rem_sec = int(math.ceil(rem_ms / 1000.0))
+    ratio = max(0.0, min(1.0, rem_ms / float(QUESTION_DURATION_MS)))
+    dash_offset = round(169.65 * (1.0 - ratio), 2)
+    stroke_col = "#f43f5e" if (rem_sec <= 5 and not is_reveal) else "#10b981"
+
+    render_html(
+        f"""
+        <div style="background:#0f172a;border:1px solid #1e293b;border-radius:20px;padding:14px 20px;display:flex;justify-content:space-between;align-items:center;">
+            <div>
+                <span style="background:rgba(245,158,11,0.2);color:#fbbf24;padding:3px 10px;border-radius:99px;font-size:12px;font-weight:800;">Görev {q_idx+1} / {len(QUESTIONS)}</span>
+                <span style="background:rgba(56,189,248,0.15);color:#38bdf8;padding:3px 10px;border-radius:99px;font-size:12px;font-weight:700;margin-left:6px;">Tema: {q['theme']}</span>
+                <div style="font-family:'Fredoka',sans-serif;font-size:26px;font-weight:700;color:white;margin-top:4px;">{q['title']}</div>
+            </div>
+            <div style="display:flex;align-items:center;gap:16px;">
+                <div style="background:#020617;border:1px solid #334155;border-radius:14px;padding:8px 14px;font-family:monospace;font-size:18px;font-weight:800;color:#38bdf8;">
+                    {answered_count}/{total_players} cevap verdi
+                </div>
+                <div style="position:relative;width:64px;height:64px;display:flex;align-items:center;justify-content:center;">
+                    <svg width="64" height="64" viewBox="0 0 64 64" style="transform:rotate(-90deg);">
+                        <circle cx="32" cy="32" r="27" stroke="#1e293b" stroke-width="6" fill="transparent"/>
+                        <circle cx="32" cy="32" r="27" stroke="{stroke_col}" stroke-width="6" stroke-linecap="round" fill="transparent" stroke-dasharray="169.65" stroke-dashoffset="{dash_offset}"/>
+                    </svg>
+                    <span style="position:absolute;font-family:monospace;font-size:20px;font-weight:800;color:{stroke_col};">{rem_sec}</span>
+                </div>
+            </div>
+        </div>
+        """
+    )
+
+
 def render_host_screen():
     pin = st.session_state.host_pin
     room = hub.get_room(pin)
@@ -762,14 +926,12 @@ def render_host_screen():
         st.session_state.host_pin = room["pin"]
         pin = room["pin"]
 
-    hub.prune_inactive_players(pin, timeout_sec=6.0)
-
     if room["state"] == "QUESTION":
         hub.tick_room(pin)
 
+    st.session_state.host_rendered_sig = (room["state"], room["currentQuestionIndex"])
     leaderboard = hub.get_leaderboard(room)
-    total_players = len(room["players"])
-    answered_count = sum(1 for p in room["players"].values() if p["currentAnswer"] is not None)
+    total_players = len(leaderboard)
 
     ctrl1, ctrl2, ctrl3, ctrl4, ctrl5 = st.columns([2.0, 1.8, 2.0, 1.6, 1.8])
     with ctrl1:
@@ -792,17 +954,30 @@ def render_host_screen():
             """
         )
     with ctrl3:
-        if st.button("🤖 + Örnek Öğrenci", use_container_width=True, disabled=(room["state"] != "LOBBY")):
-            hub.add_bot(pin)
-            st.rerun()
+        st.button(
+            "🤖 + Örnek Öğrenci",
+            key="host_btn_add_bot",
+            use_container_width=True,
+            disabled=(room["state"] != "LOBBY"),
+            on_click=_cb_host_add_bot,
+            args=(pin,),
+        )
     with ctrl4:
-        if st.button("↺ Lobiye Dön", use_container_width=True):
-            hub.reset_room(pin, keep_players=True)
-            st.rerun()
+        st.button(
+            "↺ Lobiye Dön",
+            key="host_btn_reset_keep",
+            use_container_width=True,
+            on_click=_cb_host_reset,
+            args=(pin, True),
+        )
     with ctrl5:
-        if st.button("🗑️ Odayı Temizle", use_container_width=True):
-            hub.reset_room(pin, keep_players=False)
-            st.rerun()
+        st.button(
+            "🗑️ Odayı Temizle",
+            key="host_btn_reset_clear",
+            use_container_width=True,
+            on_click=_cb_host_reset,
+            args=(pin, False),
+        )
 
     st.write("")
 
@@ -858,72 +1033,38 @@ def render_host_screen():
             )
 
         with right_col:
-            st.markdown("### 🎓 Katılan Öğrenciler")
-            if not leaderboard:
-                st.info("📡 Öğrencilerin katılması bekleniyor... Öğrenciler kendi bilgisayarlarından linke tıklayıp 4 haneli PIN ile katıldığında burada görünecek.")
-            else:
-                cols = st.columns(3)
-                for idx, p in enumerate(leaderboard):
-                    with cols[idx % 3]:
-                        render_html(
-                            f"""
-                            <div style="background:#020617;border:1px solid #334155;border-radius:14px;padding:10px 12px;margin-bottom:8px;display:flex;align-items:center;gap:10px;">
-                                <span style="font-size:22px;">{p['avatar']}</span>
-                                <div style="font-weight:700;font-size:14px;color:white;">{p['nickname']}</div>
-                            </div>
-                            """
-                        )
+            st.button(
+                "🚀 Oyunu Başlat",
+                key="host_btn_start_game",
+                type="primary",
+                use_container_width=True,
+                on_click=_cb_host_start,
+                args=(pin,),
+            )
             st.write("")
-            if st.button("🚀 Oyunu Başlat", type="primary", use_container_width=True):
-                hub.start_question(pin, 0)
-                st.rerun()
+            _host_lobby_live_fragment(pin)
 
     elif room["state"] in ("QUESTION", "REVEAL"):
         q_idx = room["currentQuestionIndex"]
         q = QUESTIONS[q_idx]
         is_reveal = (room["state"] == "REVEAL")
 
-        now_ms = time.time() * 1000.0
-        elapsed_ms = (now_ms - room["questionStartTime"]) if room["questionStartTime"] else 0
-        rem_ms = 0 if is_reveal else max(0, int(QUESTION_DURATION_MS - elapsed_ms))
-        rem_sec = int(math.ceil(rem_ms / 1000.0))
-        ratio = max(0.0, min(1.0, rem_ms / float(QUESTION_DURATION_MS)))
-        dash_offset = round(169.65 * (1.0 - ratio), 2)
-
         play_web_audio("reveal" if is_reveal else "question", f"st_{room['state']}_{pin}_{q_idx}")
 
         h_col1, h_col2 = st.columns([4.2, 1.3])
         with h_col1:
-            stroke_col = "#f43f5e" if (rem_sec <= 5 and not is_reveal) else "#10b981"
-            render_html(
-                f"""
-                <div style="background:#0f172a;border:1px solid #1e293b;border-radius:20px;padding:14px 20px;display:flex;justify-content:space-between;align-items:center;">
-                    <div>
-                        <span style="background:rgba(245,158,11,0.2);color:#fbbf24;padding:3px 10px;border-radius:99px;font-size:12px;font-weight:800;">Görev {q_idx+1} / {len(QUESTIONS)}</span>
-                        <span style="background:rgba(56,189,248,0.15);color:#38bdf8;padding:3px 10px;border-radius:99px;font-size:12px;font-weight:700;margin-left:6px;">Tema: {q['theme']}</span>
-                        <div style="font-family:'Fredoka',sans-serif;font-size:26px;font-weight:700;color:white;margin-top:4px;">{q['title']}</div>
-                    </div>
-                    <div style="display:flex;align-items:center;gap:16px;">
-                        <div style="background:#020617;border:1px solid #334155;border-radius:14px;padding:8px 14px;font-family:monospace;font-size:18px;font-weight:800;color:#38bdf8;">
-                            {answered_count}/{total_players} cevap verdi
-                        </div>
-                        <div style="position:relative;width:64px;height:64px;display:flex;align-items:center;justify-content:center;">
-                            <svg width="64" height="64" viewBox="0 0 64 64" style="transform:rotate(-90deg);">
-                                <circle cx="32" cy="32" r="27" stroke="#1e293b" stroke-width="6" fill="transparent"/>
-                                <circle cx="32" cy="32" r="27" stroke="{stroke_col}" stroke-width="6" stroke-linecap="round" fill="transparent" stroke-dasharray="169.65" stroke-dashoffset="{dash_offset}"/>
-                            </svg>
-                            <span style="position:absolute;font-family:monospace;font-size:20px;font-weight:800;color:{stroke_col};">{rem_sec}</span>
-                        </div>
-                    </div>
-                </div>
-                """
-            )
+            _host_question_live_fragment(pin)
 
         with h_col2:
             btn_lbl = "Cevabı Aç ➔" if not is_reveal else ("Final Podyumu ➔" if q_idx >= len(QUESTIONS) - 1 else "Liderlik Tablosu ➔")
-            if st.button(btn_lbl, type="primary", use_container_width=True):
-                hub.next_step(pin)
-                st.rerun()
+            st.button(
+                btn_lbl,
+                key=f"host_btn_step_{room['state']}_{q_idx}",
+                type="primary",
+                use_container_width=True,
+                on_click=_cb_host_next_step,
+                args=(pin,),
+            )
 
         unlocked_text = q["options"][q["correctIndex"]]
 
@@ -974,29 +1115,32 @@ def render_host_screen():
         )
 
         opt_counts = [0, 0, 0, 0]
-        for p in room["players"].values():
-            if p["currentAnswer"] and 0 <= p["currentAnswer"]["optionIndex"] < 4:
-                opt_counts[p["currentAnswer"]["optionIndex"]] += 1
+        with hub.lock:
+            for p in room["players"].values():
+                if p["currentAnswer"] and 0 <= p["currentAnswer"]["optionIndex"] < 4:
+                    opt_counts[p["currentAnswer"]["optionIndex"]] += 1
 
-        c_left, c_right = st.columns(2)
+        options_cards_html = ""
         for idx, opt_text in enumerate(q["options"]):
             meta = OPTION_META[idx]
-            target_col = c_left if idx % 2 == 0 else c_right
             is_correct_opt = is_reveal and (idx == q["correctIndex"])
             bg_col = "#059669" if is_correct_opt else meta["hex"]
             opacity = "0.45" if (is_reveal and not is_correct_opt) else "1.0"
             ring = "3px solid #6ee7b7" if is_correct_opt else f"2px solid {meta['border']}"
             vote_badge = f"<span style='background:#020617;padding:4px 10px;border-radius:10px;font-family:monospace;font-size:13px;'>{opt_counts[idx]} kişi {'✓' if is_correct_opt else ''}</span>" if is_reveal else ""
-
-            with target_col:
-                render_html(
-                    f"""
-                    <div style="background:{bg_col};border:{ring};opacity:{opacity};border-radius:18px;padding:16px 18px;margin-top:10px;display:flex;align-items:center;justify-content:space-between;gap:14px;color:white;font-weight:700;font-size:16px;">
-                        <span>{meta['label']} — {opt_text}</span>
-                        {vote_badge}
-                    </div>
-                    """
-                )
+            options_cards_html += f"""
+            <div style="background:{bg_col};border:{ring};opacity:{opacity};border-radius:18px;padding:16px 18px;display:flex;align-items:center;justify-content:space-between;gap:14px;color:white;font-weight:700;font-size:16px;">
+                <span>{meta['label']} — {opt_text}</span>
+                {vote_badge}
+            </div>
+            """
+        render_html(
+            f"""
+            <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin-top:12px;">
+                {options_cards_html}
+            </div>
+            """
+        )
 
         # Reveal Mode Answer Distribution Bar Chart
         if is_reveal:
@@ -1029,34 +1173,39 @@ def render_host_screen():
         with top1:
             st.markdown(f"### 🏆 Görev {room['currentQuestionIndex'] + 1} Sonrası Liderlik Tablosu (İlk 5)")
         with top2:
-            if st.button("Sonraki Soru ➔", type="primary", use_container_width=True):
-                hub.next_step(pin)
-                st.rerun()
+            st.button(
+                "Sonraki Soru ➔",
+                key=f"host_btn_next_q_{room['currentQuestionIndex']}",
+                type="primary",
+                use_container_width=True,
+                on_click=_cb_host_next_step,
+                args=(pin,),
+            )
 
         medals = ["🥇", "🥈", "🥉", "4.", "5."]
+        lb_rows_html = ""
         for idx, p in enumerate(leaderboard[:5]):
             fire_html = (
                 f"<span style='background:linear-gradient(90deg,#ea580c,#e11d48);color:white;padding:3px 10px;border-radius:99px;font-size:12px;font-weight:800;margin-left:8px;'>🔥 {p['streak']}x Seri</span>"
                 if p["fireMode"]
                 else ""
             )
-            render_html(
-                f"""
-                <div style="background:#0f172a;border:2px solid {'#f97316' if p['fireMode'] else '#334155'};border-radius:18px;padding:14px 20px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;">
-                    <div style="display:flex;align-items:center;gap:14px;">
-                        <span style="font-size:24px;font-weight:800;">{medals[idx]}</span>
-                        <span style="font-size:26px;">{p['avatar']}</span>
-                        <div>
-                            <span style="font-size:18px;font-weight:800;color:white;">{p['nickname']}</span>
-                            {fire_html}
-                        </div>
-                    </div>
-                    <div style="font-family:'JetBrains Mono',monospace;font-size:24px;font-weight:800;color:#fbbf24;">
-                        {p['score']} PUAN
+            lb_rows_html += f"""
+            <div style="background:#0f172a;border:2px solid {'#f97316' if p['fireMode'] else '#334155'};border-radius:18px;padding:14px 20px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;">
+                <div style="display:flex;align-items:center;gap:14px;">
+                    <span style="font-size:24px;font-weight:800;">{medals[idx]}</span>
+                    <span style="font-size:26px;">{p['avatar']}</span>
+                    <div>
+                        <span style="font-size:18px;font-weight:800;color:white;">{p['nickname']}</span>
+                        {fire_html}
                     </div>
                 </div>
-                """
-            )
+                <div style="font-family:'JetBrains Mono',monospace;font-size:24px;font-weight:800;color:#fbbf24;">
+                    {p['score']} PUAN
+                </div>
+            </div>
+            """
+        render_html(lb_rows_html)
 
     elif room["state"] == "FINAL_PODIUM":
         trigger_canvas_confetti(f"host_final_{pin}")
@@ -1103,8 +1252,35 @@ def render_host_screen():
 
 # ============================================================================
 # STUDENT / PLAYER SCREEN (/play)
+# Zero-UI background state watcher + static buttons so 17-35+ students have ZERO lag!
 # ============================================================================
-@st.fragment(run_every=1.0)
+@st.fragment(run_every=1.2)
+def _player_sync_fragment(pin: str, client_id: str):
+    room = hub.get_room(pin)
+    if not room:
+        st.session_state.player_joined = False
+        st.rerun()
+        return
+
+    hub.heartbeat_player(pin, client_id)
+    if room["state"] == "QUESTION":
+        hub.tick_room(pin)
+
+    player = room["players"].get(client_id)
+    if not player:
+        nick = st.session_state.get("player_nickname", "")
+        if nick:
+            player, _ = hub.join_player(pin, client_id, nick)
+        if not player:
+            st.session_state.player_joined = False
+            st.rerun()
+            return
+
+    live_sig = (room["state"], room["currentQuestionIndex"], player["currentAnswer"] is not None)
+    if live_sig != st.session_state.get("player_rendered_sig"):
+        st.rerun()
+
+
 def render_player_screen():
     if not st.session_state.player_joined or not st.session_state.player_pin:
         default_pin = query_pin or hub.latest_pin or ""
@@ -1120,52 +1296,52 @@ def render_player_screen():
                     st.error(err)
                 else:
                     st.session_state.player_pin = str(pin_val).strip()
+                    st.session_state.player_nickname = nick_val.strip()
                     st.session_state.player_joined = True
                     st.rerun()
         return
 
     pin = st.session_state.player_pin
     room = hub.get_room(pin)
-    if not room or st.session_state.client_id not in room["players"]:
+    if not room:
         st.session_state.player_joined = False
         st.rerun()
         return
 
-    hub.heartbeat_player(pin, st.session_state.client_id)
-    hub.prune_inactive_players(pin, timeout_sec=6.0)
+    player = room["players"].get(st.session_state.client_id)
+    if not player:
+        nick = st.session_state.get("player_nickname", "")
+        if nick:
+            player, _ = hub.join_player(pin, st.session_state.client_id, nick)
+        if not player:
+            st.session_state.player_joined = False
+            st.rerun()
+            return
 
     if room["state"] == "QUESTION":
         hub.tick_room(pin)
 
-    player = room["players"][st.session_state.client_id]
+    has_answered = (player["currentAnswer"] is not None)
     leaderboard = hub.get_leaderboard(room)
     my_rank = next((item["rank"] for item in leaderboard if item["id"] == player["id"]), 1)
 
-    # Top Student Status Bar
     streak_badge_html = (
         f"<span style='background:#ea580c;color:white;padding:3px 10px;border-radius:99px;font-size:12px;font-weight:800;'>🔥 {player['streak']}x Seri</span>"
         if player["fireMode"]
         else ""
     )
-    st_bar_col1, st_bar_col2 = st.columns([5.2, 1.3])
-    with st_bar_col1:
-        render_html(
-            f"""
-            <div style="background:#0f172a;border:1px solid #334155;border-radius:16px;padding:10px 16px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;">
-                <div style="font-weight:800;font-size:15px;color:white;">🕵️ {player['nickname']} <span style="font-size:11px;color:#94a3b8;margin-left:6px;">(PIN: {pin})</span></div>
-                <div style="display:flex;gap:10px;align-items:center;">
-                    {streak_badge_html}
-                    <span style="background:#020617;border:1px solid #334155;color:#38bdf8;padding:3px 10px;border-radius:10px;font-family:monospace;font-weight:800;">#{my_rank}</span>
-                    <span style="background:rgba(245,158,11,0.2);border:1px solid rgba(245,158,11,0.4);color:#fbbf24;padding:3px 12px;border-radius:10px;font-family:monospace;font-weight:800;">{player['score']} P</span>
-                </div>
+    render_html(
+        f"""
+        <div style="background:#0f172a;border:1px solid #334155;border-radius:16px;padding:10px 16px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;">
+            <div style="font-weight:800;font-size:15px;color:white;">🕵️ {player['nickname']} <span style="font-size:11px;color:#94a3b8;margin-left:6px;">(PIN: {pin})</span></div>
+            <div style="display:flex;gap:10px;align-items:center;">
+                {streak_badge_html}
+                <span style="background:#020617;border:1px solid #334155;color:#38bdf8;padding:3px 10px;border-radius:10px;font-family:monospace;font-weight:800;">#{my_rank}</span>
+                <span style="background:rgba(245,158,11,0.2);border:1px solid rgba(245,158,11,0.4);color:#fbbf24;padding:3px 12px;border-radius:10px;font-family:monospace;font-weight:800;">{player['score']} P</span>
             </div>
-            """
-        )
-    with st_bar_col2:
-        if st.button("🚪 Çıkış", use_container_width=True):
-            hub.leave_player(pin, st.session_state.client_id)
-            st.session_state.player_joined = False
-            st.rerun()
+        </div>
+        """
+    )
 
     if room["state"] == "LOBBY":
         render_html(
@@ -1182,7 +1358,9 @@ def render_player_screen():
         q_idx = room["currentQuestionIndex"]
         q = QUESTIONS[q_idx]
         now_ms = time.time() * 1000.0
-        rem_sec = max(0, int(math.ceil((QUESTION_DURATION_MS - (now_ms - room["questionStartTime"])) / 1000.0)))
+        elapsed_ms = (now_ms - room["questionStartTime"]) if room["questionStartTime"] else 0
+        rem_ms = max(0, int(QUESTION_DURATION_MS - elapsed_ms))
+        rem_sec = max(1, int(math.ceil(rem_ms / 1000.0)))
 
         if player["fireMode"]:
             render_html(
@@ -1191,18 +1369,23 @@ def render_player_screen():
 
         render_html(
             f"""
-            <div style="background:#0f172a;border:1px solid #334155;border-radius:18px;padding:14px 18px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;">
-                <div>
-                    <div style="font-size:12px;font-weight:800;color:#fbbf24;">Görev {q_idx+1} / {len(QUESTIONS)}</div>
-                    <div style="font-size:20px;font-weight:800;color:white;">{q['title']}</div>
-                    <div style="font-size:13px;color:#cbd5e1;margin-top:2px;">{q['question']}</div>
+            <div style="background:#0f172a;border:1px solid #334155;border-radius:18px;padding:14px 18px;margin-bottom:12px;">
+                <div style="display:flex;justify-content:space-between;align-items:center;">
+                    <div>
+                        <div style="font-size:12px;font-weight:800;color:#fbbf24;">Görev {q_idx+1} / {len(QUESTIONS)} • Tema: {q['theme']}</div>
+                        <div style="font-size:20px;font-weight:800;color:white;">{q['title']}</div>
+                        <div style="font-size:14px;color:#cbd5e1;margin-top:2px;">{q['question']}</div>
+                    </div>
+                    <div style="font-family:monospace;font-size:16px;font-weight:800;color:#34d399;white-space:nowrap;margin-left:10px;">⏱️ {QUESTION_DURATION_SEC} sn</div>
                 </div>
-                <div style="font-family:monospace;font-size:22px;font-weight:800;color:#34d399;">⏱️ {rem_sec}s</div>
+                <div style="width:100%;height:8px;background:#1e293b;border-radius:99px;margin-top:10px;overflow:hidden;">
+                    <div style="height:100%;border-radius:99px;animation:gicTimerShrink {rem_sec}s linear forwards;"></div>
+                </div>
             </div>
             """
         )
 
-        if player["currentAnswer"] is not None:
+        if has_answered:
             render_html(
                 """
                 <div style="background:#0f172a;border:2px solid #38bdf8;border-radius:22px;padding:28px;text-align:center;">
@@ -1220,9 +1403,13 @@ def render_player_screen():
                     render_html(
                         f"<div style='background:{meta['hex']};color:white;padding:8px 14px;border-radius:14px 14px 0 0;font-weight:800;font-size:14px;'>{meta['label']}</div>"
                     )
-                    if st.button(f"{opt_text}", key=f"ans_{q_idx}_{idx}", use_container_width=True):
-                        hub.submit_answer(pin, st.session_state.client_id, idx)
-                        st.rerun()
+                    st.button(
+                        f"{opt_text}",
+                        key=f"ans_{pin}_{q_idx}_{idx}",
+                        use_container_width=True,
+                        on_click=_cb_player_answer,
+                        args=(pin, st.session_state.client_id, idx, player["nickname"]),
+                    )
 
     elif room["state"] == "REVEAL":
         q = QUESTIONS[room["currentQuestionIndex"]]
@@ -1252,19 +1439,17 @@ def render_player_screen():
             )
 
     elif room["state"] == "LEADERBOARD":
-        render_html(
-            f"""
-            <div style="background:#0f172a;border:1px solid #334155;border-radius:18px;padding:14px 18px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;">
-                <div style="font-family:'Fredoka',sans-serif;font-size:20px;font-weight:700;color:#fbbf24;">
-                    🏆 Görev {room['currentQuestionIndex'] + 1} Sonrası Liderlik Tablosu
-                </div>
-                <div style="font-size:13px;color:#38bdf8;font-weight:800;">
-                    Senin Sıran: #{my_rank} ({player['score']} P)
-                </div>
-            </div>
-            """
-        )
         medals = ["🥇", "🥈", "🥉", "4.", "5."]
+        lb_html = f"""
+        <div style="background:#0f172a;border:1px solid #334155;border-radius:18px;padding:14px 18px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;">
+            <div style="font-family:'Fredoka',sans-serif;font-size:20px;font-weight:700;color:#fbbf24;">
+                🏆 Görev {room['currentQuestionIndex'] + 1} Sonrası Liderlik Tablosu
+            </div>
+            <div style="font-size:13px;color:#38bdf8;font-weight:800;">
+                Senin Sıran: #{my_rank} ({player['score']} P)
+            </div>
+        </div>
+        """
         for idx, p in enumerate(leaderboard[:5]):
             is_me = (p["id"] == player["id"])
             fire_html = (
@@ -1279,39 +1464,36 @@ def render_player_screen():
             )
             border_color = "#38bdf8" if is_me else ("#f97316" if p["fireMode"] else "#334155")
             bg_color = "rgba(15, 23, 42, 0.98)" if not is_me else "rgba(8, 47, 73, 0.65)"
-            render_html(
-                f"""
-                <div style="background:{bg_color};border:2px solid {border_color};border-radius:18px;padding:12px 18px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;">
-                    <div style="display:flex;align-items:center;gap:12px;">
-                        <span style="font-size:22px;font-weight:800;">{medals[idx]}</span>
-                        <span style="font-size:24px;">{p['avatar']}</span>
-                        <div>
-                            <span style="font-size:16px;font-weight:800;color:white;">{p['nickname']}</span>
-                            {me_badge}
-                            {fire_html}
-                        </div>
-                    </div>
-                    <div style="font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:800;color:#fbbf24;">
-                        {p['score']} P
+            lb_html += f"""
+            <div style="background:{bg_color};border:2px solid {border_color};border-radius:18px;padding:12px 18px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;">
+                <div style="display:flex;align-items:center;gap:12px;">
+                    <span style="font-size:22px;font-weight:800;">{medals[idx]}</span>
+                    <span style="font-size:24px;">{p['avatar']}</span>
+                    <div>
+                        <span style="font-size:16px;font-weight:800;color:white;">{p['nickname']}</span>
+                        {me_badge}
+                        {fire_html}
                     </div>
                 </div>
-                """
-            )
+                <div style="font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:800;color:#fbbf24;">
+                    {p['score']} P
+                </div>
+            </div>
+            """
         if my_rank > 5:
-            render_html(
-                f"""
-                <div style="background:rgba(8, 47, 73, 0.65);border:2px solid #38bdf8;border-radius:18px;padding:12px 18px;margin-top:6px;display:flex;justify-content:space-between;align-items:center;">
-                    <div style="display:flex;align-items:center;gap:12px;">
-                        <span style="font-size:18px;font-weight:800;color:#38bdf8;">#{my_rank}</span>
-                        <span style="font-size:24px;">{player['avatar']}</span>
-                        <span style="font-size:16px;font-weight:800;color:white;">{player['nickname']} (Sen)</span>
-                    </div>
-                    <div style="font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:800;color:#fbbf24;">
-                        {player['score']} P
-                    </div>
+            lb_html += f"""
+            <div style="background:rgba(8, 47, 73, 0.65);border:2px solid #38bdf8;border-radius:18px;padding:12px 18px;margin-top:6px;display:flex;justify-content:space-between;align-items:center;">
+                <div style="display:flex;align-items:center;gap:12px;">
+                    <span style="font-size:18px;font-weight:800;color:#38bdf8;">#{my_rank}</span>
+                    <span style="font-size:24px;">{player['avatar']}</span>
+                    <span style="font-size:16px;font-weight:800;color:white;">{player['nickname']} (Sen)</span>
                 </div>
-                """
-            )
+                <div style="font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:800;color:#fbbf24;">
+                    {player['score']} P
+                </div>
+            </div>
+            """
+        render_html(lb_html)
 
     elif room["state"] == "FINAL_PODIUM":
         trigger_canvas_confetti(f"p_final_{pin}")
@@ -1327,6 +1509,18 @@ def render_player_screen():
         st.write("")
         for b in player.get("badges", []):
             st.info(f"{b['icon']} **{b['title']}**: {b['desc']}")
+
+    st.write("")
+    st.button(
+        "🚪 Odadan Çık",
+        key="player_btn_leave",
+        on_click=_cb_player_leave,
+        args=(pin, st.session_state.client_id),
+    )
+
+    # Mark signature AFTER all buttons and cards have been rendered, then start lightweight watcher
+    st.session_state.player_rendered_sig = (room["state"], room["currentQuestionIndex"], has_answered)
+    _player_sync_fragment(pin, st.session_state.client_id)
 
 
 if st.session_state.role == "host":
